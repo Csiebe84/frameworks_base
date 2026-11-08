@@ -1,9 +1,8 @@
 name: Build Evolution X (raphael) - AOD battery chip fix
 
-# GitHub-hosted runner (public repo -> free; 6 h/job, 4 cores, 16 GB RAM,
-# ~88 GB free disk after cleanup). A full AOSP tree is heavy for this runner,
-# so: add a swapfile, sync shallow+partial with low parallelism, then build
-# the SystemUI module (which carries the fix).
+# GitHub-hosted runner (public repo -> free; 6 h/job, 4 cores, 16 GB RAM).
+# A full AOSP tree is heavy here, so: add a swapfile, sync partial-clone with
+# low parallelism + retries, then build the SystemUI module (carries the fix).
 on:
   workflow_dispatch:
     inputs:
@@ -24,7 +23,6 @@ jobs:
                       /usr/local/lib/node_modules /opt/microsoft
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           sudo docker image prune -af || true
-          # 16 GB swapfile -> absorb peak memory of parallel git/Soong.
           sudo fallocate -l 16G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=16384
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile && sudo swapon /mnt/swapfile
@@ -37,15 +35,25 @@ jobs:
           chmod +x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Init + sync Evolution X (cnb, shallow + partial, -j2)
+      - name: Init + sync Evolution X (cnb, partial, -j2, retries)
         run: |
-          set -e
           git config --global http.postBuffer 524288000
           git config --global core.compression 0
+          git config --global advice.detachedHead false
           mkdir -p "$HOME/aosp" && cd "$HOME/aosp"
-          repo init -u https://github.com/Evolution-X/manifest -b cnb \
-                    --depth=1 --partial-clone --clone-filter=blob:limit=10M --no-clone-bundle
-          repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --fail-fast --quiet || repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --fail-fast
+          if [ ! -d .repo ]; then
+            repo init -u https://github.com/Evolution-X/manifest -b cnb \
+                      --partial-clone --clone-filter=blob:limit=10M --no-clone-bundle
+          fi
+          ok=0
+          for i in 1 2 3 4 5; do
+            echo "=== sync attempt $i ==="
+            if repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --optimized-fetch; then ok=1; break; fi
+            echo "attempt $i failed, cleaning partial state and retrying"
+            repo forall -c 'git reset --hard' 2>/dev/null || true
+            sleep 20
+          done
+          [ "$ok" = 1 ] || { echo "sync failed after retries"; exit 1; }
           df -h . ; du -sh .repo 2>/dev/null || true
 
       - name: Apply the AOD battery chip fix
