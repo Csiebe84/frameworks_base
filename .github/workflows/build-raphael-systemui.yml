@@ -1,7 +1,9 @@
 name: Build Evolution X (raphael) - AOD battery chip fix
 
-# Manual trigger only. Needs a self-hosted runner with >=12 cores / 64 GB RAM /
-# ~300 GB free disk (a full AOSP tree does NOT fit GitHub-hosted runners).
+# Runs on a GitHub-hosted runner (free for public repos, 6 h max, 4 cores /
+# 16 GB RAM / ~88 GB disk). The build is memory/disk/time constrained, so the
+# workflow frees disk first and builds SystemUI (the module that carries the
+# fix) rather than the whole ROM.
 on:
   workflow_dispatch:
     inputs:
@@ -12,15 +14,16 @@ on:
 
 jobs:
   build:
-    runs-on: [self-hosted, linux, x64, aosp]
-    timeout-minutes: 720
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
     steps:
-      - name: Prep workspace (SSD, never /tmp)
+      - name: Free disk space
         run: |
-          set -e
-          mkdir -p "$HOME/aosp"
-          cd "$HOME/aosp"
-          df -h .
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune -af || true
+          df -h /
 
       - name: Install repo tool
         run: |
@@ -29,34 +32,28 @@ jobs:
           chmod +x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Init + sync Evolution X (cnb)
+      - name: Init + sync Evolution X (cnb, shallow + partial)
         run: |
           set -e
-          cd "$HOME/aosp"
-          if [ ! -d .repo ]; then
-            repo init -u https://github.com/Evolution-X/manifest -b cnb --git-lfs
-          fi
-          repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags
+          mkdir -p "$HOME/aosp" && cd "$HOME/aosp"
+          repo init -u https://github.com/Evolution-X/manifest -b cnb \
+                    --depth=1 --partial-clone --clone-filter=blob:limit=10M
+          repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags --fail-fast
+          df -h . ; du -sh .repo
 
       - name: Apply the AOD battery chip fix
         run: |
           set -e
           cd "$HOME/aosp/frameworks/base"
-          git fetch https://github.com/Csiebe84/frameworks_base "${{ github.event.inputs.fix_branch }}"
+          git fetch --depth=1 https://github.com/Csiebe84/frameworks_base "${{ github.event.inputs.fix_branch }}"
           git cherry-pick FETCH_HEAD
 
-      - name: Build SystemUI (fast check) then the full ROM
+      - name: Build SystemUI (compiles the fix)
         run: |
           set -e
           cd "$HOME/aosp"
           source build/envsetup.sh
           lunch lineage_raphael-cnb-user
           mka SystemUI -j"$(nproc)"
-          mka bacon -j"$(nproc)"
-
-      - name: Upload ROM
-        uses: actions/upload-artifact@v4
-        with:
-          name: EvolutionX-raphael-ota
-          path: ${{ env.HOME }}/aosp/out/target/product/raphael/*.zip
-          if-no-files-found: warn
+          ls -l out/target/product/raphael/system/system_ext/priv-app/SystemUI/ 2>/dev/null || true
+          find out -name 'SystemUI.apk' -exec ls -l {} \; || true
