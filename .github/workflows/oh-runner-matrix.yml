@@ -1,0 +1,12 @@
+name: oh-runner-matrix
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04, ubuntu-latest-4-cores, ubuntu-24.04-8-cores, ubuntu-latest-8-cores, ubuntu-24.04-16-cores]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: echo "OK ${{ matrix.os }}"; nproc; free -h | head -2
