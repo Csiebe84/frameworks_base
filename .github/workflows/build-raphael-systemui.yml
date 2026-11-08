@@ -1,8 +1,8 @@
 name: Build Evolution X (raphael) - AOD battery chip fix
 
 # GitHub-hosted runner (public repo -> free; 6 h/job, 4 cores, 16 GB RAM).
-# A full AOSP tree is heavy here, so: add a swapfile, sync partial-clone with
-# low parallelism + retries, then build the SystemUI module (carries the fix).
+# A full AOSP tree is heavy on 16 GB, so keep memory low: -j1 sync, single git
+# pack thread, swapfile, then build only the SystemUI module (carries the fix).
 on:
   workflow_dispatch:
     inputs:
@@ -35,22 +35,24 @@ jobs:
           chmod +x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Init + sync Evolution X (cnb, partial, -j2, retries)
+      - name: Init + sync Evolution X (cnb, -j1, low memory, retries)
         run: |
           git config --global http.postBuffer 524288000
           git config --global core.compression 0
+          git config --global pack.threads 1
+          git config --global pack.windowMemory 64m
+          git config --global pack.deltaCacheSize 32m
           git config --global advice.detachedHead false
           mkdir -p "$HOME/aosp" && cd "$HOME/aosp"
           if [ ! -d .repo ]; then
             repo init -u https://github.com/Evolution-X/manifest -b cnb \
-                      --partial-clone --clone-filter=blob:limit=10M --no-clone-bundle
+                      --no-clone-bundle --no-tags
           fi
           ok=0
-          for i in 1 2 3 4 5; do
+          for i in 1 2 3 4 5 6; do
             echo "=== sync attempt $i ==="
-            if repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --optimized-fetch; then ok=1; break; fi
-            echo "attempt $i failed, cleaning partial state and retrying"
-            repo forall -c 'git reset --hard' 2>/dev/null || true
+            if nice -n 5 repo sync -c -j1 --force-sync --no-clone-bundle --no-tags; then ok=1; break; fi
+            echo "attempt $i failed; retrying"
             sleep 20
           done
           [ "$ok" = 1 ] || { echo "sync failed after retries"; exit 1; }
@@ -60,7 +62,7 @@ jobs:
         run: |
           set -e
           cd "$HOME/aosp/frameworks/base"
-          git fetch --depth=1 https://github.com/Csiebe84/frameworks_base "${{ github.event.inputs.fix_branch }}"
+          git fetch https://github.com/Csiebe84/frameworks_base "${{ github.event.inputs.fix_branch }}"
           git cherry-pick FETCH_HEAD
 
       - name: Build SystemUI (compiles the fix)
@@ -69,5 +71,5 @@ jobs:
           cd "$HOME/aosp"
           source build/envsetup.sh
           lunch lineage_raphael-cnb-user
-          mka SystemUI -j2
+          nice -n 5 mka SystemUI -j2
           find out -name 'SystemUI.apk' -exec ls -l {} \; || true
